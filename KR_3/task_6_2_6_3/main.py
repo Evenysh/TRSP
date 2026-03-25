@@ -24,7 +24,7 @@ if MODE == "PROD":
 else:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
-security = HTTPBasic()
+security = HTTPBasic(auto_error=False)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
@@ -93,7 +93,14 @@ def login(current_user: UserInDB = Depends(auth_user)):
 
 
 # Задание 6.3 ================================================================
-def verify_docs_auth(credentials: HTTPBasicCredentials = Depends(security)):
+def verify_docs_auth(credentials: HTTPBasicCredentials | None):
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
     correct_username = secrets.compare_digest(credentials.username, DOCS_USER)
     correct_password = secrets.compare_digest(credentials.password, DOCS_PASSWORD)
 
@@ -106,9 +113,13 @@ def verify_docs_auth(credentials: HTTPBasicCredentials = Depends(security)):
 
 
 @app.get("/docs", include_in_schema=False)
-def custom_swagger_ui(credentials: HTTPBasicCredentials = Depends(verify_docs_auth)):
+def custom_swagger_ui(
+    credentials: HTTPBasicCredentials | None = Depends(security)
+):
     if MODE == "PROD":
         raise HTTPException(status_code=404, detail="Not Found")
+
+    verify_docs_auth(credentials)
 
     return get_swagger_ui_html(
         openapi_url="/openapi.json",
@@ -117,9 +128,13 @@ def custom_swagger_ui(credentials: HTTPBasicCredentials = Depends(verify_docs_au
 
 
 @app.get("/openapi.json", include_in_schema=False)
-def custom_openapi(credentials: HTTPBasicCredentials = Depends(verify_docs_auth)):
+def custom_openapi(
+    credentials: HTTPBasicCredentials | None = Depends(security)
+):
     if MODE == "PROD":
         raise HTTPException(status_code=404, detail="Not Found")
+
+    verify_docs_auth(credentials)
 
     return JSONResponse(app.openapi())
 

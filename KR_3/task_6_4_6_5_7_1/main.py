@@ -187,8 +187,6 @@ def protected_resource(
 ):
     return {
         "message": "Access granted",
-        "user": current_user["username"],
-        "role": current_user["role"]
     }
 
 
