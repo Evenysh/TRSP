@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Cookie, HTTPException, Response
 from pydantic import BaseModel, EmailStr, Field
-from itsdangerous import Signer
+from itsdangerous import Signer, BadSignature
 
 app = FastAPI()
 
@@ -87,35 +87,13 @@ def get_product(product_id: int):
     return {"message": "Product not found"}
 
 
-# Задание 5.1-5.2 ============================================================
-class ThemeData(BaseModel):
-    theme: str
+# Общая модель для входа ======================================================
+class LoginData(BaseModel):
+    username: str
+    password: str
 
 
-@app.post("/set_theme")
-def set_theme(data: ThemeData, response: Response):
-    response.set_cookie(
-        key="theme",
-        value=data.theme,
-        httponly=False,
-        secure=False,
-        max_age=3600
-    )
-    return {"message": "Theme cookie has been set", "theme": data.theme}
-
-
-@app.get("/get_theme")
-def get_theme(theme: str | None = Cookie(default=None)):
-    if theme is None:
-        raise HTTPException(status_code=404, detail="Theme cookie not found")
-
-    return {"theme": theme}
-
-
-# Задание 5.3 ================================================================
-SECRET_KEY = "super-secret-key"
-signer = Signer(SECRET_KEY)
-
+# Тестовые данные пользователя ===============================================
 fake_user = {
     "username": "user123",
     "password": "password123",
@@ -124,41 +102,57 @@ fake_user = {
 }
 
 
-class LoginData(BaseModel):
-    username: str
-    password: str
+# Задание 5.1 ================================================================
+# Простая аутентификация на основе cookie без подписи.
+# После успешного входа сервер устанавливает cookie session_token="valid_token".
+# Защищенный маршрут /user_simple разрешает доступ только при наличии
+# корректного cookie session_token.
+
+@app.post("/login_simple")
+def login_simple(data: LoginData, response: Response):
+    if data.username != fake_user["username"] or data.password != fake_user["password"]:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    response.set_cookie(
+        key="session_token",
+        value="valid_token",
+        httponly=True
+    )
+
+    return {"message": "Login successful"}
 
 
-def build_session_token(user_id: str, timestamp: int) -> str:
-    value = f"{user_id}.{timestamp}"
-    signature = signer.get_signature(value.encode()).decode()
-    return f"{user_id}.{timestamp}.{signature}"
+@app.get("/user_simple")
+def user_simple(session_token: str | None = Cookie(default=None)):
+    if session_token != "valid_token":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    return {
+        "username": fake_user["username"],
+        "full_name": fake_user["full_name"],
+        "email": fake_user["email"]
+    }
 
 
-def parse_and_validate_session(session_token: str):
-    parts = session_token.split(".")
-    if len(parts) != 3:
-        raise HTTPException(status_code=401, detail="Invalid session")
+# Задание 5.2 ================================================================
+# Расширение предыдущего задания:
+# теперь session_token содержит user_id и криптографическую подпись.
+# Для генерации и проверки подписи используется библиотека itsdangerous.
 
-    user_id, timestamp_str, signature = parts
-    value = f"{user_id}.{timestamp_str}"
-    expected_signature = signer.get_signature(value.encode()).decode()
+SECRET_KEY = "super-secret-key"
+signer = Signer(SECRET_KEY)
 
-    if signature != expected_signature:
-        raise HTTPException(status_code=401, detail="Invalid session")
 
+def build_signed_session_token(user_id: str) -> str:
+    return signer.sign(user_id.encode()).decode()
+
+
+def parse_signed_session_token(session_token: str) -> str:
     try:
-        last_activity = int(timestamp_str)
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Invalid session")
-
-    now = int(time.time())
-    passed = now - last_activity
-
-    if passed > 300:
-        raise HTTPException(status_code=401, detail="Session expired")
-
-    return user_id, last_activity, now, passed
+        user_id = signer.unsign(session_token.encode()).decode()
+        return user_id
+    except BadSignature:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 @app.post("/login")
@@ -167,14 +161,12 @@ def login(data: LoginData, response: Response):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     user_id = str(uuid4())
-    now = int(time.time())
-    session_token = build_session_token(user_id, now)
+    session_token = build_signed_session_token(user_id)
 
     response.set_cookie(
         key="session_token",
         value=session_token,
         httponly=True,
-        secure=False,
         max_age=300
     )
 
@@ -182,19 +174,95 @@ def login(data: LoginData, response: Response):
 
 
 @app.get("/profile")
-def profile(response: Response, session_token: str | None = Cookie(default=None)):
+def profile(session_token: str | None = Cookie(default=None)):
     if not session_token:
-        raise HTTPException(status_code=401, detail="Invalid session")
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
-    user_id, last_activity, now, passed = parse_and_validate_session(session_token)
+    user_id = parse_signed_session_token(session_token)
+
+    return {
+        "user_id": user_id,
+        "username": fake_user["username"],
+        "full_name": fake_user["full_name"],
+        "email": fake_user["email"]
+    }
+
+
+# Задание 5.3 ================================================================
+# Расширение cookie-аутентификации:
+# session_token содержит user_id, timestamp и подпись.
+# Если с момента последней активности прошло более 5 минут,
+# сессия считается истекшей.
+# Если прошло от 3 до 5 минут, cookie обновляется автоматически.
+
+SESSION_SECRET_KEY = "session-secret-key"
+session_signer = Signer(SESSION_SECRET_KEY)
+
+
+def build_timed_session_token(user_id: str, timestamp: int) -> str:
+    value = f"{user_id}:{timestamp}"
+    signed_value = session_signer.sign(value.encode()).decode()
+    return signed_value
+
+
+def parse_timed_session_token(session_token: str):
+    try:
+        unsigned_value = session_signer.unsign(session_token.encode()).decode()
+    except BadSignature:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    parts = unsigned_value.split(":")
+    if len(parts) != 2:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    user_id, timestamp_str = parts
+
+    try:
+        last_activity = int(timestamp_str)
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    now = int(time.time())
+    passed = now - last_activity
+
+    if passed > 300:
+        raise HTTPException(status_code=401, detail="Session expired")
+
+    return user_id, now, passed
+
+
+@app.post("/login_timed")
+def login_timed(data: LoginData, response: Response):
+    if data.username != fake_user["username"] or data.password != fake_user["password"]:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    user_id = str(uuid4())
+    now = int(time.time())
+    session_token = build_timed_session_token(user_id, now)
+
+    response.set_cookie(
+        key="session_token",
+        value=session_token,
+        httponly=True,
+        max_age=300
+    )
+
+    return {"message": "Login successful"}
+
+
+@app.get("/profile_timed")
+def profile_timed(response: Response, session_token: str | None = Cookie(default=None)):
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    user_id, now, passed = parse_timed_session_token(session_token)
 
     if 180 <= passed < 300:
-        new_token = build_session_token(user_id, now)
+        new_token = build_timed_session_token(user_id, now)
         response.set_cookie(
             key="session_token",
             value=new_token,
             httponly=True,
-            secure=False,
             max_age=300
         )
 
@@ -204,7 +272,6 @@ def profile(response: Response, session_token: str | None = Cookie(default=None)
         "full_name": fake_user["full_name"],
         "email": fake_user["email"]
     }
-
 
 # Задание 5.4-5.5 ============================================================
 from datetime import datetime
