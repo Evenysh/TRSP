@@ -87,6 +87,31 @@ def get_product(product_id: int):
     return {"message": "Product not found"}
 
 
+# Задание 5.1-5.2 ============================================================
+class ThemeData(BaseModel):
+    theme: str
+
+
+@app.post("/set_theme")
+def set_theme(data: ThemeData, response: Response):
+    response.set_cookie(
+        key="theme",
+        value=data.theme,
+        httponly=False,
+        secure=False,
+        max_age=3600
+    )
+    return {"message": "Theme cookie has been set", "theme": data.theme}
+
+
+@app.get("/get_theme")
+def get_theme(theme: str | None = Cookie(default=None)):
+    if theme is None:
+        raise HTTPException(status_code=404, detail="Theme cookie not found")
+
+    return {"theme": theme}
+
+
 # Задание 5.3 ================================================================
 SECRET_KEY = "super-secret-key"
 signer = Signer(SECRET_KEY)
